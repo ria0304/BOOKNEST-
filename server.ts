@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
@@ -16,7 +15,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-bookhaven';
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 5000;
 
   app.use(cors());
   app.use(express.json());
@@ -67,7 +66,6 @@ async function startServer() {
 
   // --- API Routes ---
 
-  // Auth (unchanged)
   app.post('/api/auth/register', async (req, res) => {
     const { username, email, password, name, gender, birthday } = req.body;
     try {
@@ -164,7 +162,6 @@ async function startServer() {
     }
   });
 
-  // Books (Library) – newest first
   app.get('/api/library', authenticateToken, (req: any, res) => {
     const stmt = db.prepare(`
       SELECT ub.*, b.title, b.author, b.cover_url, b.open_library_id
@@ -230,7 +227,6 @@ async function startServer() {
     }
   });
 
-  // Vault (Uploads)
   app.post('/api/vault/upload', authenticateToken, upload.single('file'), (req: any, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { title } = req.body;
@@ -314,7 +310,6 @@ async function startServer() {
     }
   });
 
-  // Analytics
   app.get('/api/analytics', authenticateToken, (req: any, res) => {
     try {
       const stmt = db.prepare(`
@@ -337,12 +332,10 @@ async function startServer() {
     }
   });
 
-  // ========== MONTHLY READING ACTIVITY (includes vault books) ==========
   app.get('/api/reading/monthly-books', authenticateToken, (req: any, res) => {
     const { year } = req.query;
     const currentYear = year ? parseInt(year as string) : new Date().getFullYear();
     try {
-      // Books completed from library (status='completed')
       const completedStmt = db.prepare(`
         SELECT 
           strftime('%m', updated_at) as month,
@@ -356,7 +349,6 @@ async function startServer() {
       `);
       const completedBooks = completedStmt.all(req.user.id, String(currentYear));
 
-      // Books added from library
       const addedStmt = db.prepare(`
         SELECT 
           strftime('%m', created_at) as month,
@@ -368,7 +360,6 @@ async function startServer() {
       `);
       const addedBooks = addedStmt.all(req.user.id, String(currentYear));
 
-      // Reading sessions (both library and vault)
       const sessionsStmt = db.prepare(`
         SELECT 
           strftime('%m', session_start) as month,
@@ -381,7 +372,6 @@ async function startServer() {
       `);
       const readingSessions = sessionsStmt.all(req.user.id, String(currentYear));
 
-      // Books read from vault (distinct uploaded_books with at least one session in that month)
       const vaultBooksReadStmt = db.prepare(`
         SELECT 
           strftime('%m', session_start) as month,
@@ -394,7 +384,6 @@ async function startServer() {
       `);
       const vaultBooksRead = vaultBooksReadStmt.all(req.user.id, String(currentYear));
 
-      // Create map for all 12 months
       const monthlyMap = new Map();
       for (let i = 1; i <= 12; i++) {
         const monthStr = i.toString().padStart(2, '0');
@@ -408,28 +397,24 @@ async function startServer() {
         });
       }
 
-      // Fill in library completed books
       completedBooks.forEach((book: any) => {
         const monthStr = book.month.padStart(2, '0');
         const existing = monthlyMap.get(monthStr);
         if (existing) existing.books_completed = book.books_completed;
       });
 
-      // Fill in vault books read
       vaultBooksRead.forEach((v: any) => {
         const monthStr = v.month.padStart(2, '0');
         const existing = monthlyMap.get(monthStr);
         if (existing) existing.vault_books_read = v.vault_books_read;
       });
 
-      // Fill in added books
       addedBooks.forEach((book: any) => {
         const monthStr = book.month.padStart(2, '0');
         const existing = monthlyMap.get(monthStr);
         if (existing) existing.books_added = book.books_added;
       });
 
-      // Fill in reading sessions
       readingSessions.forEach((session: any) => {
         const monthStr = session.month.padStart(2, '0');
         const existing = monthlyMap.get(monthStr);
@@ -439,10 +424,7 @@ async function startServer() {
         }
       });
 
-      // Convert to array sorted by month
       const monthlyData = Array.from(monthlyMap.values()).sort((a, b) => a.month - b.month);
-
-      // Totals
       const totalBooksCompleted = completedBooks.reduce((sum, b) => sum + b.books_completed, 0);
       const totalVaultBooksRead = vaultBooksRead.reduce((sum, v) => sum + v.vault_books_read, 0);
       const totalBooksAdded = addedBooks.reduce((sum, b) => sum + b.books_added, 0);
@@ -470,7 +452,6 @@ async function startServer() {
     }
   });
 
-  // ========== AI-POWERED SUGGESTIONS ==========
   app.get('/api/ai/suggestions', authenticateToken, async (req: any, res) => {
     try {
       const historyStmt = db.prepare(`
@@ -487,6 +468,7 @@ async function startServer() {
       const prefStmt = db.prepare('SELECT current_obsession FROM user_preferences WHERE user_id = ?');
       const obsession = prefStmt.get(req.user.id) as any;
       const suggestions = [];
+      
       if (history.length > 0) {
         const topAuthor = history[0]?.author;
         if (topAuthor && topAuthor !== 'Unknown') {
@@ -500,6 +482,7 @@ async function startServer() {
           });
         }
       }
+      
       const genreStmt = db.prepare('SELECT favorite_genres FROM user_preferences WHERE user_id = ?');
       const genres = genreStmt.get(req.user.id) as any;
       if (genres?.favorite_genres) {
@@ -515,6 +498,7 @@ async function startServer() {
           });
         }
       }
+      
       if (mood?.last_mood) {
         const moodSuggestions: Record<string, { title: string; description: string; icon: string }> = {
           '😊': { title: 'Happy Reads', description: 'Uplifting books to match your cheerful mood', icon: '😊' },
@@ -541,6 +525,7 @@ async function startServer() {
           });
         }
       }
+      
       if (obsession?.current_obsession) {
         suggestions.push({
           type: 'obsession',
@@ -551,6 +536,7 @@ async function startServer() {
           value: obsession.current_obsession,
         });
       }
+      
       const streakStmt = db.prepare(`
         SELECT COUNT(DISTINCT DATE(session_start)) as streak
         FROM reading_sessions
@@ -574,7 +560,6 @@ async function startServer() {
     }
   });
 
-  // ========== GOODREADS SEARCH (ENHANCED) ==========
   app.get('/api/books/goodreads-search', authenticateToken, async (req: any, res: any) => {
     const rawQuery = req.query.q ?? req.query.query ?? '';
     const normalizedQuery = String(rawQuery).trim();
@@ -711,7 +696,6 @@ async function startServer() {
     }
   });
 
-  // Test Goodreads endpoint
   app.get('/api/books/test-goodreads', authenticateToken, (req: any, res: any) => {
     try {
       const tableCheck = db.prepare(
@@ -741,7 +725,6 @@ async function startServer() {
     }
   });
 
-  // Book Search Proxy (Google Books & Open Library Fallback)
   app.get('/api/books/search', authenticateToken, async (req: any, res) => {
     const { q, source = 'google' } = req.query;
     if (!q) return res.status(400).json({ error: 'Search query is required' });
@@ -826,7 +809,6 @@ async function startServer() {
     }
   });
 
-  // Book Details Proxy
   app.get('/api/books/details/:id', authenticateToken, async (req: any, res) => {
     const { id } = req.params;
     const { source = 'google' } = req.query;
@@ -853,7 +835,6 @@ async function startServer() {
     }
   });
 
-  // ========== DRPA & RECOMMENDATIONS (IMPROVED) ==========
   app.get('/api/recommendations/drpa', authenticateToken, async (req: any, res) => {
     try {
       const prefStmt = db.prepare('SELECT * FROM user_preferences WHERE user_id = ?');
@@ -893,7 +874,6 @@ async function startServer() {
       else if (prefs && prefs.reading_frequency === 'Daily') personality = 'The Daily Devourer';
       else if (prefs && prefs.preferred_mood === 'Thought-provoking') personality = 'The Deep Thinker';
 
-      // Build a clean search query based on obsession or genre
       let searchQuery = '';
       if (prefs?.current_obsession) {
         searchQuery = `${prefs.current_obsession} bestsellers`;
@@ -928,19 +908,6 @@ async function startServer() {
           }))
           .filter((book: any) => book.title && book.author !== 'Unknown' && book.title.length > 3)
           .slice(0, 6);
-
-        if (recommendations.length === 0) {
-          const fallbackResponse = await fetch(
-            'https://www.googleapis.com/books/v1/volumes?q=bestselling%20fiction%202024&maxResults=6'
-          );
-          const fallbackData = await fallbackResponse.json();
-          recommendations = (fallbackData.items || []).map((item: any) => ({
-            key: item.id,
-            title: item.volumeInfo.title,
-            author: item.volumeInfo.authors ? item.volumeInfo.authors[0] : 'Unknown',
-            cover_url: item.volumeInfo.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
-          }));
-        }
       } catch (e) {
         console.error('Failed to fetch recommendations', e);
       }
@@ -962,7 +929,6 @@ async function startServer() {
     }
   });
 
-  // Mood-based Recommendations
   app.get('/api/recommendations/mood', authenticateToken, async (req: any, res) => {
     try {
       const { mood } = req.query;
@@ -1015,7 +981,6 @@ async function startServer() {
     }
   });
 
-  // Movies (TMDB)
   app.get('/api/movies/search', authenticateToken, async (req: any, res) => {
     const { title } = req.query;
     if (!title) return res.status(400).json({ error: 'Title is required' });
@@ -1045,24 +1010,16 @@ async function startServer() {
     }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
+  // Serve static frontend files in production
+  const distPath = path.join(__dirname, 'dist');
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(` Server running on http://localhost:${PORT}`);
-    console.log(` Uploads directory: ${uploadsDir}`);
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Uploads directory: ${uploadsDir}`);
   });
 }
 
