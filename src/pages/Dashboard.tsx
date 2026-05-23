@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { BookOpen, Clock, Star, Brain, Sparkles, Compass, Plus, Check, Zap, Calendar, Lightbulb } from 'lucide-react';
+import { BookOpen, Clock, Star, Brain, Sparkles, Compass, Plus, Check, Zap, Calendar, Lightbulb, TrendingUp } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { Link } from 'react-router-dom';
 

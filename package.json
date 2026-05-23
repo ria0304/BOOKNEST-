@@ -13,6 +13,8 @@
     "start": "node dist/server.cjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1053.0",
+    "@aws-sdk/lib-storage": "^3.1053.0",
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
