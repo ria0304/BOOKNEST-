@@ -17,7 +17,7 @@ export default function Auth() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
+    const endpoint = `${import.meta.env.VITE_API_URL || ''}${isLogin ? '/api/auth/login' : '/api/auth/register'}`;
     const body = isLogin ? { email, password } : { username, email, password, name, gender, birthday };
 
     try {
@@ -57,7 +57,11 @@ export default function Auth() {
           {isLogin ? 'Welcome back to your library' : 'Begin your reading journey'}
         </p>
 
-        {error && <div className="bg-red-900/50 border border-red-500/50 text-red-200 p-3 rounded-lg mb-6 text-sm text-center">{error}</div>}
+        {error && (
+          <div className="bg-red-900/50 border border-red-500/50 text-red-200 p-3 rounded-lg mb-6 text-sm text-center">
+            {error}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {!isLogin && (
