@@ -92,3 +92,4 @@ better-sqlite3
 📚 Open Library API → Books, covers, metadata
 🎬 TMDB API → Movie data, ratings, posters
 # test
+# trigger s3 upload
