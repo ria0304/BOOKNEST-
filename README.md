@@ -415,3 +415,9 @@ S3_BUCKET=booknest-app-uploads
 | GET | `/api/recommendations/mood` | Mood-based recommendations |
 | GET | `/api/books/search` | Search books (Google/OpenLibrary) |
 | GET | `/api/movies/search` | Search movie adaptations (TMDB) |
+
+
+
+
+## License
+This project is licensed under the [MIT License](LICENSE).
