@@ -44,6 +44,52 @@
 
 ---
 
+
+## 🗺️ Application Flowchart
+
+```mermaid
+flowchart TD
+    A([👤 User]) --> B{Registered?}
+
+    B -- No --> C[Register\nname · email · password]
+    B -- Yes --> D[Login]
+
+    C --> E[Onboarding\ngenres · mood · reading frequency]
+    D --> F[🏠 Home / Dashboard]
+    E --> F
+
+    F --> G[🔍 Search Books\nGoogle Books · Open Library]
+    F --> H[📚 My Library]
+    F --> I[📊 Dashboard Analytics]
+    F --> J[👤 Profile]
+    F --> K[📦 Vault]
+
+    G --> G1{Save Book?}
+    G1 -- Yes --> H
+    G1 -- No --> G
+
+    H --> H1[Set Status\nWant to Read · Reading · Completed]
+    H1 --> H2[Add Rating ⭐ and Notes]
+    H2 --> H3[Log Mood 🎭]
+    H3 --> L[🧠 DRPA Engine\nanalyses history · genre · mood · obsession]
+    L --> M[Personalised Recommendations]
+
+    I --> I1[Monthly Charts\nbooks added · completed · reading days]
+    I --> I2[Streak Tracker 🔥]
+    I --> I3[Mood Breakdown]
+
+    K --> K1[Upload PDF / EPUB]
+    K1 --> K2[☁️ Saved to AWS S3]
+    K2 --> K3[📖 Read In-App epub.js]
+
+    G --> N[🎬 Book-to-Movie Mode\nTMDB API]
+    N --> N1[Compare Book vs Movie Rating]
+
+    J --> J1[Edit Profile]
+    J --> J2[Manage Uploaded Books]
+    J --> J3[Logout]
+```
+
 ## ✨ Features
 
 ### 🔍 Book Discovery
@@ -369,13 +415,3 @@ S3_BUCKET=booknest-app-uploads
 | GET | `/api/recommendations/mood` | Mood-based recommendations |
 | GET | `/api/books/search` | Search books (Google/OpenLibrary) |
 | GET | `/api/movies/search` | Search movie adaptations (TMDB) |
-
----
-
-## 🤝 Contributing
-
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Commit changes: `git commit -m 'Add your feature'`
-4. Push to the branch: `git push origin feature/your-feature`
-5. Open a Pull Request targeting `master`
