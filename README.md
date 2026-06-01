@@ -8,17 +8,19 @@
 ![React](https://img.shields.io/badge/Frontend-React%2018-61DAFB?style=flat-square&logo=react)
 ![SQLite](https://img.shields.io/badge/Database-SQLite-003B57?style=flat-square&logo=sqlite)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat-square&logo=docker)
-![AWS](https://img.shields.io/badge/AWS-Deployed-FF9900?style=flat-square&logo=amazonaws)
+![AWS](https://img.shields.io/badge/AWS-S3%20%2B%20CloudFront-FF9900?style=flat-square&logo=amazonaws)
 ![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?style=flat-square&logo=githubactions)
 
 ---
 
 ## 🌐 Live URLs
 
-| URL | Purpose |
-|-----|---------|
-| [https://d2t9ocwr95ejyv.cloudfront.net](https://d2t9ocwr95ejyv.cloudfront.net) | 🌍 Frontend — S3 + CloudFront (HTTPS, CDN) |
-| http://13.201.69.202 | ⚙️ Backend API — EC2 Mumbai + Fallback |
+| URL | Purpose | Status |
+|-----|---------|--------|
+| [https://d2t9ocwr95ejyv.cloudfront.net](https://d2t9ocwr95ejyv.cloudfront.net) | 🌍 Frontend — S3 + CloudFront (HTTPS, CDN) | ✅ Live |
+| http://13.201.69.202 | ⚙️ Backend API — EC2 Mumbai | ⏸️ Disabled |
+
+> **Note:** The EC2 backend is currently disabled. The frontend loads but API-dependent features (login, library, recommendations, vault) will not work. To run the full app, follow the [local setup instructions](#-getting-started-local) below.
 
 ---
 
@@ -29,7 +31,7 @@
 | `main` | Stable / mirrored code |
 | `master` | Active development — **push here triggers auto-deploy** |
 
-> **Note:** Pushing to `master` automatically triggers the CI/CD pipeline and deploys to production.
+> Pushing to `master` automatically triggers the CI/CD pipeline and deploys the frontend to production.
 
 ---
 
@@ -43,7 +45,6 @@
 - 🧠 **Intelligent Recommendations** — Personalised picks via the DRPA engine
 
 ---
-
 
 ## 🗺️ Application Flowchart
 
@@ -89,6 +90,8 @@ flowchart TD
     J --> J2[Manage Uploaded Books]
     J --> J3[Logout]
 ```
+
+---
 
 ## ✨ Features
 
@@ -195,12 +198,12 @@ Outputs a **personality type** (e.g., *The Voracious Reader*, *The Deep Thinker*
 | Docker Compose | Single-container orchestration, port 80→5000 |
 
 ### ☁️ AWS Infrastructure
-| Service | Purpose |
-|---------|---------|
-| S3 (`booknest-app-uploads`) | Frontend hosting + PDF/EPUB file storage |
-| CloudFront (`d2t9ocwr95ejyv`) | CDN, HTTPS, OAC security, global edge caching |
-| EC2 (`13.201.69.202`, Mumbai) | Backend API host, Docker container |
-| IAM (`booknest-ec2-s3-role`) | EC2 instance profile for S3 access |
+| Service | Purpose | Status |
+|---------|---------|--------|
+| S3 (`booknest-app-uploads`) | Frontend hosting + PDF/EPUB file storage | ✅ Active |
+| CloudFront (`d2t9ocwr95ejyv`) | CDN, HTTPS, OAC security, global edge caching | ✅ Active |
+| EC2 (`13.201.69.202`, Mumbai) | Backend API host, Docker container | ⏸️ Disabled |
+| IAM (`booknest-ec2-s3-role`) | EC2 instance profile for S3 access | ✅ Active |
 
 ### 🔐 Auth
 | Tech | Purpose |
@@ -229,14 +232,14 @@ Outputs a **personality type** (e.g., *The Voracious Reader*, *The Deep Thinker*
 User
  │
  ▼
-CloudFront (HTTPS + CDN)          ← https://d2t9ocwr95ejyv.cloudfront.net
+CloudFront (HTTPS + CDN)          ← https://d2t9ocwr95ejyv.cloudfront.net  ✅ Active
  │   OAC (Origin Access Control)
  ▼
-S3 Bucket                         ← React dist/ (HTML, CSS, JS)
+S3 Bucket                         ← React dist/ (HTML, CSS, JS)             ✅ Active
  │
  │  API calls
  ▼
-EC2 Instance (Mumbai)             ← http://13.201.69.202
+EC2 Instance (Mumbai)             ← http://13.201.69.202                    ⏸️ Disabled
  │   Docker Container (port 80→5000)
  ▼
 Express API (Node.js + TypeScript)
@@ -269,6 +272,7 @@ GitHub Actions Workflow
       │
       └── 4. Deploy Backend → EC2
               SSH into EC2 → git pull → docker-compose up --build -d
+              ⚠️  EC2 is currently disabled — this step will be skipped
 ```
 
 ### GitHub Secrets Configured
@@ -416,8 +420,8 @@ S3_BUCKET=booknest-app-uploads
 | GET | `/api/books/search` | Search books (Google/OpenLibrary) |
 | GET | `/api/movies/search` | Search movie adaptations (TMDB) |
 
-
-
+---
 
 ## License
+
 This project is licensed under the [MIT License](LICENSE).
