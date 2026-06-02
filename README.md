@@ -374,7 +374,6 @@ BOOKNEST/
 ├── vite.config.ts              # Vite configuration
 ├── tsconfig.json               # TypeScript config
 ├── package.json                # Dependencies & scripts
-└── bookhaven.db                # SQLite database file
 ```
 
 ---
