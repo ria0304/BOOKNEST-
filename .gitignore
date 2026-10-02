@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+bookhaven.db
+
+# User-uploaded book files
+uploads/
