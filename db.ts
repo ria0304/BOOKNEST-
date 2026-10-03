@@ -2,8 +2,12 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-// Use process.cwd() instead of import.meta.url for Docker compatibility
-const dbPath = path.join(process.cwd(), 'bookhaven.db');
+// Use process.cwd() instead of import.meta.url for Docker compatibility.
+// DB_PATH lets deployments (and the test suite) point at a persistent volume.
+const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'bookhaven.db');
+if (process.env.DB_PATH) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+}
 const db = new Database(dbPath);
 
 // ==================== SCHEMA ====================
@@ -83,9 +87,20 @@ db.exec(`
     session_end DATETIME,
     pages_read INTEGER,
     duration_minutes INTEGER,
+    mood_before TEXT,
+    mood_after TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (book_id) REFERENCES books(id),
     FOREIGN KEY (uploaded_book_id) REFERENCES uploaded_books(id)
+  );
+
+  -- Mood Logs (ad-hoc "how am I feeling" readings from the dashboard)
+  CREATE TABLE IF NOT EXISTS mood_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    mood TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
   -- Goodreads Books
@@ -109,7 +124,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_user_books_status ON user_books(status);
   CREATE INDEX IF NOT EXISTS idx_reading_sessions_user_id ON reading_sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_uploaded_books_user_id ON uploaded_books(user_id);
+  CREATE INDEX IF NOT EXISTS idx_mood_logs_user_id ON mood_logs(user_id);
 `);
+
+// ==================== MIGRATIONS FOR EXISTING DATABASES ====================
+// CREATE TABLE IF NOT EXISTS does not add columns to tables that already exist,
+// so bring older databases up to date explicitly.
+const migrations: { table: string; column: string; definition: string }[] = [
+  { table: 'reading_sessions', column: 'mood_before', definition: 'mood_before TEXT' },
+  { table: 'reading_sessions', column: 'mood_after', definition: 'mood_after TEXT' },
+];
+
+for (const migration of migrations) {
+  try {
+    const columns = db.prepare(`PRAGMA table_info(${migration.table})`).all() as any[];
+    if (columns.length && !columns.some(c => c.name === migration.column)) {
+      db.exec(`ALTER TABLE ${migration.table} ADD COLUMN ${migration.definition}`);
+      console.log(`⬆️  Added ${migration.table}.${migration.column}`);
+    }
+  } catch (err) {
+    console.error(`Could not migrate ${migration.table}.${migration.column}:`, err);
+  }
+}
 
 // ==================== FTS5 VIRTUAL TABLE FOR GOODREADS ====================
 try {

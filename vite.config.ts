@@ -17,6 +17,19 @@ export default defineConfig(({ mode }) => {
     },
     server: {
             hmr: process.env.DISABLE_HMR !== 'true',
+            port: 5173,
+            proxy: {
+                // In dev the SPA runs on Vite (:5173) while the API runs on
+                // Express (:5000); proxy /api so relative apiFetch() calls work.
+                '/api': {
+                    target: process.env.VITE_API_PROXY || 'http://localhost:5000',
+                    changeOrigin: true,
+                },
+                '/uploads': {
+                    target: process.env.VITE_API_PROXY || 'http://localhost:5000',
+                    changeOrigin: true,
+                },
+            },
     },
   };
 });

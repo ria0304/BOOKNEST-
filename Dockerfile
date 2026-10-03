@@ -14,4 +14,6 @@ COPY --from=frontend-builder /app/dist ./dist
 EXPOSE 5000
 ENV NODE_ENV=production
 ENV PORT=5000
+ENV DB_PATH=/app/data/bookhaven.db
+VOLUME ["/app/data"]
 CMD ["npx", "tsx", "server.ts"]

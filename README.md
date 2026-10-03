@@ -8,30 +8,27 @@
 ![React](https://img.shields.io/badge/Frontend-React%2018-61DAFB?style=flat-square&logo=react)
 ![SQLite](https://img.shields.io/badge/Database-SQLite-003B57?style=flat-square&logo=sqlite)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat-square&logo=docker)
-![AWS](https://img.shields.io/badge/AWS-S3%20%2B%20CloudFront-FF9900?style=flat-square&logo=amazonaws)
-![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?style=flat-square&logo=githubactions)
 
 ---
 
-## 🌐 Live URLs
+## 🌐 Running Locally
 
-| URL | Purpose | Status |
-|-----|---------|--------|
-| [https://d2t9ocwr95ejyv.cloudfront.net](https://d2t9ocwr95ejyv.cloudfront.net) | 🌍 Frontend — S3 + CloudFront (HTTPS, CDN) | ✅ Live |
-| http://13.201.69.202 | ⚙️ Backend API — EC2 Mumbai | ⏸️ Disabled |
+This project runs entirely on your machine — no cloud account required. Frontend and
+backend are served together from the Node/Express app on port `5000`.
 
-> **Note:** The EC2 backend is currently disabled. The frontend loads but API-dependent features (login, library, recommendations, vault) will not work. To run the full app, follow the [local setup instructions](#-getting-started-local) below.
+| URL | Purpose |
+|-----|---------|
+| http://localhost:5000 | 🌍 Frontend + API (single Express server) |
+
+See [Getting Started](#-getting-started-local) below.
+
 
 ---
 
 ## 🌿 Branches
 
-| Branch | Description |
-|--------|-------------|
-| `main` | Stable / mirrored code |
-| `master` | Active development — **push here triggers auto-deploy** |
-
-> Pushing to `master` automatically triggers the CI/CD pipeline and deploys the frontend to production.
+> No CI/CD is configured in this repository. Build and run locally, or with
+> `docker-compose up --build`.
 
 ---
 
@@ -80,7 +77,7 @@ flowchart TD
     I --> I3[Mood Breakdown]
 
     K --> K1[Upload PDF / EPUB]
-    K1 --> K2[☁️ Saved to AWS S3]
+    K1 --> K2[💾 Saved to local uploads/ dir]
     K2 --> K3[📖 Read In-App epub.js]
 
     G --> N[🎬 Book-to-Movie Mode\nTMDB API]
@@ -115,7 +112,7 @@ flowchart TD
 
 ### 📦 Personal Book Vault
 - Upload **PDF** and **EPUB** files
-- Private, secure file storage (S3-backed on AWS `ap-south-1`)
+- Private file storage (local `uploads/` directory, served at `/uploads`)
 - Access your uploaded books anytime
 
 ### 📖 In-App Reading
@@ -188,22 +185,14 @@ Outputs a **personality type** (e.g., *The Voracious Reader*, *The Deep Thinker*
 |------|---------|
 | Node.js + Express | REST API server |
 | TypeScript (via tsx) | Type-safe backend, runs directly |
-| Multer | File uploads (PDF/EPUB) |
-| AWS S3 (`ap-south-1`) | Cloud file storage |
+| Multer | File uploads (PDF/EPUB), written to local disk |
+| Local filesystem (`uploads/`) | PDF/EPUB file storage, served at `/uploads` |
 
 ### 🐳 Containerization
 | Tech | Purpose |
 |------|---------|
 | Docker (`node:20-slim`) | Container runtime with glibc for better-sqlite3 |
 | Docker Compose | Single-container orchestration, port 80→5000 |
-
-### ☁️ AWS Infrastructure
-| Service | Purpose | Status |
-|---------|---------|--------|
-| S3 (`booknest-app-uploads`) | Frontend hosting + PDF/EPUB file storage | ✅ Active |
-| CloudFront (`d2t9ocwr95ejyv`) | CDN, HTTPS, OAC security, global edge caching | ✅ Active |
-| EC2 (`13.201.69.202`, Mumbai) | Backend API host, Docker container | ⏸️ Disabled |
-| IAM (`booknest-ec2-s3-role`) | EC2 instance profile for S3 access | ✅ Active |
 
 ### 🔐 Auth
 | Tech | Purpose |
@@ -232,28 +221,21 @@ Outputs a **personality type** (e.g., *The Voracious Reader*, *The Deep Thinker*
 User
  │
  ▼
-CloudFront (HTTPS + CDN)          ← https://d2t9ocwr95ejyv.cloudfront.net  ✅ Active
- │   OAC (Origin Access Control)
+Express Server (Node.js + TypeScript)   ← http://localhost:5000
+ │   serves React dist/ (HTML, CSS, JS) + /api
  ▼
-S3 Bucket                         ← React dist/ (HTML, CSS, JS)             ✅ Active
- │
- │  API calls
- ▼
-EC2 Instance (Mumbai)             ← http://13.201.69.202                    ⏸️ Disabled
- │   Docker Container (port 80→5000)
- ▼
-Express API (Node.js + TypeScript)
+Docker Container (port 80→5000)
  │
  ├── SQLite DB (bookhaven.db)
- └── S3 Bucket                    ← PDF/EPUB uploads (booknest-app-uploads)
+ ├── uploads/                     ← PDF/EPUB files
+ └── goodreads_books + FTS5       ← 6.4M-book search dataset
 ```
 
 ---
 
-## 🔄 CI/CD Pipeline
+## 🔄 Build & Run
 
-Fully automated with **GitHub Actions** (`.github/workflows/deploy.yml`).  
-**Trigger: push to `master`**
+Fully automated with **Docker Compose**.
 
 ```
 Push to master
@@ -261,32 +243,12 @@ Push to master
       ▼
 GitHub Actions Workflow
       │
-      ├── 1. Build Frontend
+      ├── 1. Build
       │       npm install && npm run build → dist/
       │
-      ├── 2. Deploy Frontend → S3
-      │       aws s3 sync dist/ s3://booknest-app-uploads
-      │
-      ├── 3. Invalidate CloudFront Cache
-      │       CloudFront distribution invalidation
-      │
-      └── 4. Deploy Backend → EC2
-              SSH into EC2 → git pull → docker-compose up --build -d
-              ⚠️  EC2 is currently disabled — this step will be skipped
+      └── 2. Run
+              docker-compose up --build -d
 ```
-
-### GitHub Secrets Configured
-
-| Secret | Purpose |
-|--------|---------|
-| `AWS_ACCESS_KEY_ID` | IAM user `github-actions-deploy` |
-| `AWS_SECRET_ACCESS_KEY` | IAM user secret |
-| `EC2_HOST` | EC2 public IP (`13.201.69.202`) |
-| `EC2_SSH_KEY` | Private key for EC2 SSH access |
-
-### IAM Permissions
-- `AmazonS3FullAccess` — Frontend deploy + file uploads
-- `CloudFrontFullAccess` — Cache invalidation on deploy
 
 ---
 
@@ -331,9 +293,21 @@ App available at `http://localhost:80`
 
 ### (Optional) Import Goodreads Data
 
+Search runs against a local copy of the Goodreads books dataset (6,389,859
+books). It is **resumable** — if the import is interrupted, run the same command
+again and it continues from where it stopped.
+
 ```bash
-python import_goodreads.py
+pip install pyarrow          # only dependency; no `datasets` needed
+
+python import_goodreads.py                 # resume, or no-op if complete
+python import_goodreads.py --fresh         # drop the table and re-import
+python import_goodreads.py --rebuild-fts  # force the FTS5 search index
 ```
+
+The first run downloads the dataset (~16 GB cache) and can take a while. The
+server builds the FTS5 index automatically on first start, and skips the rebuild
+whenever the index is already current.
 
 ---
 
@@ -341,9 +315,6 @@ python import_goodreads.py
 
 ```
 BOOKNEST/
-├── .github/
-│   └── workflows/
-│       └── deploy.yml          # CI/CD GitHub Actions workflow
 ├── src/
 │   ├── components/
 │   │   └── Navbar.tsx          # Navigation bar
@@ -369,7 +340,9 @@ BOOKNEST/
 ├── db.ts                       # SQLite database setup
 ├── Dockerfile                  # Docker image (node:20-slim)
 ├── docker-compose.yml          # Container orchestration (port 80:5000)
-├── import_goodreads.py         # Goodreads dataset importer
+├── import_goodreads.py         # Resumable Goodreads dataset importer (Arrow streaming)
+├── tests/
+│   └── api.test.ts             # API smoke tests (`npm test`)
 ├── index.html                  # HTML entry point
 ├── vite.config.ts              # Vite configuration
 ├── tsconfig.json               # TypeScript config
@@ -382,17 +355,32 @@ BOOKNEST/
 
 Create a `.env` file in the root:
 
-```env
-JWT_SECRET=your-secret-key
-TMDB_API_KEY=your-tmdb-api-key
-PORT=5000
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `JWT_SECRET` | **Yes in production** | Signing key for auth tokens. The server refuses to start in production without it; in development it falls back to an insecure default and warns. |
+| `JWT_EXPIRES_IN` | No | Token lifetime — seconds (`900`) or a duration (`12h`, `7d`). Default `7d`. |
+| `TMDB_API_KEY` | No | Enables Book-to-Movie comparisons. Without it the endpoint returns clearly-labelled mock data. |
+| `PORT` | No | Defaults to `5000`. |
+| `DB_PATH` | No | SQLite file location. Defaults to `./bookhaven.db`; set it to a mounted volume (the Docker image uses `/app/data/bookhaven.db`). |
+| `ALLOWED_ORIGINS` | No | Comma-separated CORS allow-list. Defaults to the local dev origins. |
+| `DISABLE_HMR` | No | Set to `true` to turn off Vite HMR. |
 
-# AWS S3 (for file vault)
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AWS_REGION=ap-south-1
-S3_BUCKET=booknest-app-uploads
+Uploaded PDF/EPUB files are stored in the local `uploads/` directory — no cloud
+credentials are required.
+
+---
+
+## 🧪 Tests
+
+```bash
+npm test
 ```
+
+Runs an 18-case smoke suite against a real server on a random free port, using a
+throwaway SQLite database so your development data is never touched. It covers
+auth validation and token expiry, the partial-update regressions that used to
+wipe ratings and profile fields, mood analytics, reading sessions, JSON 404s for
+unknown API routes, and the security headers.
 
 ---
 
@@ -409,7 +397,7 @@ S3_BUCKET=booknest-app-uploads
 | POST | `/api/library` | Add book to library |
 | PUT | `/api/library/:id` | Update book (status, rating, notes, mood) |
 | DELETE | `/api/library/:id` | Remove book |
-| POST | `/api/vault/upload` | Upload PDF/EPUB to S3 |
+| POST | `/api/vault/upload` | Upload PDF/EPUB to local `uploads/` |
 | GET | `/api/vault` | List uploaded files |
 | DELETE | `/api/vault/:id` | Delete uploaded file |
 | GET | `/api/analytics` | Reading stats by status and mood |

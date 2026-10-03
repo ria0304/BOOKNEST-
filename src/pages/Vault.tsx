@@ -25,6 +25,7 @@ export default function Vault() {
   const [pagesRead, setPagesRead] = useState(0);
   const [readingMood, setReadingMood] = useState<string | null>(null);
   const [showMoodPicker, setShowMoodPicker] = useState(false);
+  const [showMoodAfterPicker, setShowMoodAfterPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const epubContainerRef = useRef<HTMLDivElement>(null);
   const renditionRef = useRef<any>(null);
@@ -32,6 +33,17 @@ export default function Vault() {
   useEffect(() => {
     fetchVault();
   }, []);
+
+  // One timer for both transient messages, replaced (never stacked) whenever a
+  // new message arrives, and always cleared on unmount.
+  useEffect(() => {
+    if (!error && !successMsg) return;
+    const timer = setTimeout(() => {
+      setError(null);
+      setSuccessMsg(null);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [error, successMsg]);
 
   useEffect(() => {
     if (activeBook && activeBook.file_url.endsWith('.epub') && epubContainerRef.current) {
@@ -42,13 +54,24 @@ export default function Vault() {
           height: '100%',
           spread: 'none'
         });
-        rendition.display();
         renditionRef.current = rendition;
 
-        return () => {
-          if (renditionRef.current) {
-            renditionRef.current.destroy();
+        // display() is async: a corrupt or missing file rejects here, and the
+        // surrounding try/catch cannot see it.
+        rendition.display().catch((err: unknown) => {
+          console.error('Error displaying EPUB:', err);
+          setError('This EPUB could not be opened. It may be corrupt.');
+          if (renditionRef.current === rendition) {
+            renditionRef.current = null;
           }
+          rendition.destroy();
+        });
+
+        return () => {
+          if (renditionRef.current === rendition) {
+            renditionRef.current = null;
+          }
+          rendition.destroy();
           book.destroy();
         };
       } catch (err) {
@@ -85,42 +108,68 @@ export default function Vault() {
     return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
   };
 
+  /** Open a book and immediately record the reading session. */
+  const openBook = async (book: UploadedBook) => {
+    setActiveBook(book);
+    setPagesRead(0);
+    setReadingMood(null);
+    setShowMoodPicker(false);
+    await startReadingSession(book);
+  };
+
   const startReadingSession = async (book: UploadedBook, moodBefore?: string) => {
     try {
       const response = await apiFetch('/api/reading/session/start', {
         method: 'POST',
         body: JSON.stringify({
           uploaded_book_id: book.id,
-          mood_before: moodBefore,
-          device_type: 'web'
+          mood_before: moodBefore ?? null
         })
       });
-      
+
       if (response.success) {
         setCurrentSessionId(response.session_id);
+        return response.session_id as number;
       }
     } catch (error) {
       console.error('Failed to start session:', error);
     }
+    return null;
   };
 
-  const endReadingSession = async (moodAfter?: string) => {
-    if (!currentSessionId) return;
-    
+  /** Attach a mood to the session that is already running (picked after opening). */
+  const tagSessionMood = async (sessionId: number, mood: string) => {
+    try {
+      await apiFetch(`/api/reading/session/${sessionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ mood_before: mood })
+      });
+    } catch (error) {
+      console.error('Failed to tag session mood:', error);
+    }
+  };
+
+  const endReadingSession = async (moodAfter?: string, sessionIdOverride?: number | null) => {
+    // Capture which session is being closed. Without this, a slow request
+    // resolves after the reader has already opened the next book and clears
+    // that newer session id.
+    const sessionId = sessionIdOverride ?? currentSessionId;
+    if (!sessionId) return;
+
     try {
       await apiFetch('/api/reading/session/end', {
         method: 'POST',
         body: JSON.stringify({
-          session_id: currentSessionId,
+          session_id: sessionId,
           pages_read: pagesRead,
           mood_after: moodAfter
         })
       });
-      
-      setCurrentSessionId(null);
+
+      // Only clear state if the session that ended is still the current one.
+      setCurrentSessionId(cur => (cur === sessionId ? null : cur));
       setPagesRead(0);
       setSuccessMsg('Reading session saved!');
-      setTimeout(() => setSuccessMsg(null), 3000);
     } catch (error) {
       console.error('Failed to end session:', error);
     }
@@ -134,13 +183,11 @@ export default function Vault() {
     const isEpub = file.name.toLowerCase().endsWith('.epub');
     if (!isPdf && !isEpub) {
       setError('Only PDF and EPUB files are supported.');
-      setTimeout(() => setError(null), 3000);
       return;
     }
 
     if (file.size > 50 * 1024 * 1024) {
       setError('File size must be less than 50MB');
-      setTimeout(() => setError(null), 3000);
       return;
     }
 
@@ -182,17 +229,15 @@ export default function Vault() {
       });
       
       const newBook = await uploadPromise;
-      setBooks([newBook as UploadedBook, ...books]);
-      
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      
+      setBooks(prev => [newBook as UploadedBook, ...prev]);
       setSuccessMsg('Book uploaded successfully!');
-      setTimeout(() => setSuccessMsg(null), 3000);
     } catch (error) {
       console.error('Upload error', error);
       setError('Failed to upload book. Please try again.');
-      setTimeout(() => setError(null), 3000);
     } finally {
+      // Reset in finally so choosing the same file again after a failure still
+      // fires a change event.
+      if (fileInputRef.current) fileInputRef.current.value = '';
       setUploading(false);
       setUploadProgress(0);
     }
@@ -203,13 +248,11 @@ export default function Vault() {
     
     try {
       await apiFetch(`/api/vault/${id}`, { method: 'DELETE' });
-      setBooks(books.filter(b => b.id !== id));
+      setBooks(prev => prev.filter(b => b.id !== id));
       setSuccessMsg(`"${title}" has been removed from your vault.`);
-      setTimeout(() => setSuccessMsg(null), 3000);
     } catch (error) {
       console.error('Failed to remove book', error);
       setError('Failed to delete book. Please try again.');
-      setTimeout(() => setError(null), 3000);
     }
   };
 
@@ -324,7 +367,7 @@ export default function Vault() {
               
               <div className="flex space-x-2 w-full">
                 <button 
-                  onClick={() => setActiveBook(book)}
+                  onClick={() => openBook(book)}
                   className="flex-1 bg-pink-600/20 hover:bg-pink-600/40 text-pink-400 text-sm font-medium py-2 rounded-lg flex items-center justify-center transition-colors border border-pink-500/30"
                 >
                   <BookOpen className="w-4 h-4 mr-1" /> Read
@@ -386,7 +429,9 @@ export default function Vault() {
                             onClick={() => {
                               setReadingMood(emoji);
                               setShowMoodPicker(false);
-                              startReadingSession(activeBook, emoji);
+                              // The session already started when the book was
+                              // opened; just attach the mood to it.
+                              if (currentSessionId) tagSessionMood(currentSessionId, emoji);
                             }}
                             className="text-xl hover:scale-110 transition-transform p-1"
                           >
@@ -412,16 +457,40 @@ export default function Vault() {
                   )}
                   
                   {/* End Session Button */}
-                  {currentSessionId && (
+                  {currentSessionId && !showMoodAfterPicker && (
                     <button
-                      onClick={() => {
-                        const moodAfter = prompt('How do you feel after reading?', readingMood || '');
-                        endReadingSession(moodAfter || undefined);
-                      }}
+                      onClick={() => setShowMoodAfterPicker(true)}
                       className="text-xs bg-red-900/50 text-white px-2 py-1 rounded hover:bg-red-800 transition-colors"
                     >
                       End Session
                     </button>
+                  )}
+
+                  {currentSessionId && showMoodAfterPicker && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] text-gray-400 uppercase tracking-wide">How do you feel?</span>
+                      {moods.map(emoji => (
+                        <button
+                          key={`after-${emoji}`}
+                          onClick={() => {
+                            setShowMoodAfterPicker(false);
+                            void endReadingSession(emoji, currentSessionId);
+                          }}
+                          className="text-lg hover:scale-110 transition-transform p-0.5"
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => {
+                          setShowMoodAfterPicker(false);
+                          void endReadingSession(undefined, currentSessionId);
+                        }}
+                        className="text-[10px] text-gray-400 hover:text-white underline ml-1"
+                      >
+                        skip
+                      </button>
+                    </div>
                   )}
                   
                   {activeBook.file_url.endsWith('.epub') && (
@@ -431,12 +500,16 @@ export default function Vault() {
                     </div>
                   )}
                   <button 
-                    onClick={() => {
+                    onClick={async () => {
+                      // Close the session before tearing the reader down, so it
+                      // is always recorded.
                       if (currentSessionId) {
-                        endReadingSession(readingMood || undefined);
+                        await endReadingSession(readingMood || undefined, currentSessionId);
                       }
                       setActiveBook(null);
                       setShowMoodPicker(false);
+                      setShowMoodAfterPicker(false);
+                      setReadingMood(null);
                     }}
                     className="p-2 bg-red-900/20 hover:bg-red-900/50 text-red-400 rounded-lg transition-colors"
                   >

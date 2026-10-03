@@ -119,9 +119,9 @@ export default function BookDetails() {
           <div className="bg-purple-950/20 border border-purple-900/50 rounded-2xl p-6 space-y-6">
             {/* Smart Availability */}
             <div className="flex flex-wrap gap-3 pb-6 border-b border-purple-900/50">
-              {book.open_library_id && (
+              {book.open_library_id?.startsWith('/') && (
                 <a 
-                  href={`https://openlibrary.org/works/${book.open_library_id}`} 
+                  href={`https://openlibrary.org${book.open_library_id}`} 
                   target="_blank" 
                   rel="noopener noreferrer"
                   className="flex items-center text-sm bg-blue-900/30 text-blue-300 px-4 py-2 rounded-lg hover:bg-blue-800/40 transition-colors"

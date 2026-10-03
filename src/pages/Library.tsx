@@ -102,15 +102,28 @@ export default function Library() {
       ) : filteredBooks.length === 0 ? (
         <div className="text-center py-20 bg-purple-950/10 rounded-2xl border border-purple-900/30 border-dashed">
           <BookOpen className="w-16 h-16 text-purple-800 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-gray-300 mb-2">Your library is empty</h3>
-          <p className="text-gray-500 mb-6">Start discovering new books to add to your collection.</p>
-          <Link 
-            to="/search" 
-            className="inline-flex items-center space-x-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white px-6 py-3 rounded-full font-medium hover:from-purple-500 hover:to-pink-500 transition-all shadow-lg shadow-pink-500/25"
-          >
-            <Search className="w-4 h-4" />
-            <span>Find Books</span>
-          </Link>
+          {books.length === 0 ? (
+            <>
+              <h3 className="text-xl font-semibold text-gray-300 mb-2">Your library is empty</h3>
+              <p className="text-gray-500 mb-6">Start discovering new books to add to your collection.</p>
+              <Link 
+                to="/search" 
+                className="inline-flex items-center space-x-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white px-6 py-3 rounded-full font-medium hover:from-purple-500 hover:to-pink-500 transition-all shadow-lg shadow-pink-500/25"
+              >
+                <Search className="w-4 h-4" />
+                <span>Find Books</span>
+              </Link>
+            </>
+          ) : (
+            <>
+              <h3 className="text-xl font-semibold text-gray-300 mb-2">
+                No books marked &ldquo;{tabs.find(t => t.id === filter)?.label.toLowerCase()}&rdquo;
+              </h3>
+              <p className="text-gray-500">
+                You have {books.length} book{books.length === 1 ? '' : 's'} in your library — none in this category yet.
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
@@ -194,7 +207,7 @@ export default function Library() {
                     <option value="completed" className="bg-purple-950 text-white">Completed</option>
                   </select>
                   
-                  {book.open_library_id && (
+                  {book.open_library_id?.startsWith('/') && (
                     <a 
                       href={`https://openlibrary.org${book.open_library_id}`}
                       target="_blank"

@@ -607,7 +607,7 @@ export default function Dashboard() {
                 <div key={mood.mood} className="bg-purple-900/30 border border-purple-800/50 rounded-xl p-4 flex flex-col items-center justify-center min-w-[100px]">
                   <span className="text-4xl mb-2">{mood.mood}</span>
                   <span className="text-xl font-bold text-white">{mood.count}</span>
-                  <span className="text-xs text-gray-400 uppercase tracking-wider mt-1">Books</span>
+                  <span className="text-xs text-gray-400 uppercase tracking-wider mt-1">Logs</span>
                 </div>
               ))}
               {!analytics?.moodCounts?.length && (

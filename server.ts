@@ -1,29 +1,107 @@
-import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { Upload } from '@aws-sdk/lib-storage';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { type SignOptions } from 'jsonwebtoken';
 import db from './db.js';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import fs from 'fs';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-bookhaven';
+const INSECURE_DEV_SECRET = 'super-secret-key-for-bookhaven';
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
-const s3 = new S3Client({ region: 'ap-south-1' });
-const S3_BUCKET = 'booknest-app-uploads';
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET?.trim();
+  if (secret) return secret;
+
+  if (NODE_ENV === 'production') {
+    console.error(
+      '\n FATAL: JWT_SECRET is not set.\n' +
+      ' Refusing to start in production with the fallback secret.\n' +
+      ' Add JWT_SECRET to your .env file (see README → Environment Variables).\n'
+    );
+    process.exit(1);
+  }
+
+  console.warn(
+    '\n WARNING: JWT_SECRET is not set — using an insecure development fallback.\n' +
+    ' Set JWT_SECRET in .env before deploying anywhere.\n'
+  );
+  return INSECURE_DEV_SECRET;
+}
+
+const JWT_SECRET = resolveJwtSecret();
+
+function resolveTokenExpiry(): SignOptions['expiresIn'] {
+  const raw = process.env.JWT_EXPIRES_IN?.trim();
+  if (!raw) return '7d';
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (/^\d+(s|m|h|d|w|y)$/.test(raw)) return raw as SignOptions['expiresIn'];
+  console.warn(
+    `JWT_EXPIRES_IN "${raw}" is not a valid duration (use seconds like 900, or 12h / 7d) — using 7d`
+  );
+  return '7d';
+}
+
+const TOKEN_EXPIRES_IN = resolveTokenExpiry();
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
+
+const isValidEmail = (value: unknown): string | null => {
+  if (typeof value !== 'string' || !value.trim()) return 'Email is required';
+  if (value.length > 254 || !EMAIL_RE.test(value.trim())) return 'Enter a valid email address';
+  return null;
+};
+
+const isValidUsername = (value: unknown): string | null => {
+  if (typeof value !== 'string' || !value.trim()) return 'Username is required';
+  if (!USERNAME_RE.test(value.trim())) {
+    return 'Username must be 3-32 characters (letters, numbers, _ . -)';
+  }
+  return null;
+};
+
+const isValidPassword = (value: unknown): string | null => {
+  if (typeof value !== 'string' || !value) return 'Password is required';
+  if (value.length < 8) return 'Password must be at least 8 characters';
+  if (value.length > 200) return 'Password must be at most 200 characters';
+  return null;
+};
 
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 5000;
 
-  app.use(cors());
-  app.use(express.json());
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5000,http://localhost:80')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
+
+  app.use(cors({
+    origin(origin, callback) {
+      // Allow same-origin/non-browser callers (curl, mobile webviews send no Origin)
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    },
+    credentials: true,
+  }));
+  app.use(express.json({ limit: '1mb' }));
+  app.disable('x-powered-by');
+  app.use((req: any, res: any, next: any) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
 
   // Setup uploads directory
   const uploadsDir = path.join(__dirname, 'uploads');
@@ -32,7 +110,20 @@ async function startServer() {
   }
   app.use('/uploads', express.static(uploadsDir));
 
-  const storage = multer.memoryStorage();
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+      const base = path.basename(file.originalname)
+        .replace(/[/\\]/g, '')
+        .replace(/\.{2,}/g, '.')
+        .replace(/[\x00-\x1f]/g, '')
+        .trim()
+        .slice(0, 100) || 'book';
+      cb(null, `${Date.now()}-${base}`);
+    }
+  });
 
   const upload = multer({
     storage,
@@ -42,7 +133,10 @@ async function startServer() {
       if (ext === '.pdf' || ext === '.epub') {
         cb(null, true);
       } else {
-        cb(new Error('Only PDF and EPUB files are allowed'));
+        // Tag the status so the error handler returns 400, not a generic 500.
+        const err: any = new Error('Only PDF and EPUB files are allowed');
+        err.status = 400;
+        cb(err);
       }
     }
   });
@@ -51,34 +145,74 @@ async function startServer() {
   const authenticateToken = (req: any, res: any, next: any) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.sendStatus(401);
+    if (token == null) return res.status(401).json({ error: 'Authentication required' });
     jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-      if (err) return res.sendStatus(403);
+      if (err) {
+        const expired = err.name === 'TokenExpiredError';
+        return res.status(401).json({
+          error: expired ? 'Session expired, please sign in again' : 'Invalid token',
+        });
+      }
       req.user = user;
       next();
     });
   };
 
+  const requireFields = (fields: Record<string, (value: unknown) => string | null>) =>
+    (req: any, res: any, next: any) => {
+      for (const [field, validate] of Object.entries(fields)) {
+        const message = validate(req.body?.[field]);
+        if (message) return res.status(400).json({ error: message });
+      }
+      next();
+    };
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many attempts, please try again later' },
+  });
+
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 300,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please slow down' },
+  });
+
+  app.use('/api/', apiLimiter);
+
   // --- API Routes ---
 
-  app.post('/api/auth/register', async (req, res) => {
+  app.post('/api/auth/register', authLimiter, requireFields({
+    username: isValidUsername,
+    email: isValidEmail,
+    password: isValidPassword,
+  }), async (req, res) => {
     const { username, email, password, name, gender, birthday } = req.body;
     try {
+      const existing = db.prepare('SELECT id FROM users WHERE email = ? OR username = ?').get(email, username);
+      if (existing) {
+        return res.status(409).json({ error: 'That email or username is already registered' });
+      }
       const hashedPassword = await bcrypt.hash(password, 10);
       const stmt = db.prepare(
         'INSERT INTO users (username, email, password, name, gender, birthday) VALUES (?, ?, ?, ?, ?, ?)'
       );
-      const info = stmt.run(username, email, hashedPassword, name, gender, birthday);
-      const token = jwt.sign({ id: info.lastInsertRowid, username }, JWT_SECRET);
-      res.json({
+      const info = stmt.run(username, email, hashedPassword, name ?? null, gender ?? null, birthday ?? null);
+      const token = jwt.sign({ id: info.lastInsertRowid, username }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
+      res.status(201).json({
         token,
         user: {
           id: info.lastInsertRowid,
           username,
           email,
-          name,
-          gender,
-          birthday,
+          name: name ?? null,
+          gender: gender ?? null,
+          birthday: birthday ?? null,
           onboarded: 0,
         },
       });
@@ -87,15 +221,22 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/login', async (req, res) => {
+  app.post('/api/auth/login', authLimiter, requireFields({
+    email: isValidEmail,
+    password: (v) => (typeof v === 'string' && v ? null : 'Password is required'),
+  }), async (req, res) => {
     const { email, password } = req.body;
     try {
       const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
       const user = stmt.get(email) as any;
-      if (!user) return res.status(400).json({ error: 'User not found' });
-      const validPassword = await bcrypt.compare(password, user.password);
-      if (!validPassword) return res.status(400).json({ error: 'Invalid password' });
-      const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
+      // Always run a bcrypt comparison so response time does not reveal whether
+      // the account exists.
+      const hash = user?.password || '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidin';
+      const validPassword = await bcrypt.compare(password, hash);
+      if (!user || !validPassword) {
+        return res.status(401).json({ error: 'Incorrect email or password' });
+      }
+      const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
       res.json({
         token,
         user: {
@@ -109,7 +250,7 @@ async function startServer() {
         },
       });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'Login failed' });
     }
   });
 
@@ -137,21 +278,61 @@ async function startServer() {
   });
 
   app.put('/api/auth/me', authenticateToken, async (req: any, res) => {
-    const { username, email, password, name, gender, birthday } = req.body;
+    const { username, email, password, name, gender, birthday } = req.body ?? {};
+    const has = (field: string) => Object.prototype.hasOwnProperty.call(req.body, field);
+
     try {
-      if (password) {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const stmt = db.prepare(
-          'UPDATE users SET username = ?, email = ?, password = ?, name = ?, gender = ?, birthday = ? WHERE id = ?'
-        );
-        stmt.run(username, email, hashedPassword, name, gender, birthday, req.user.id);
-      } else {
-        const stmt = db.prepare(
-          'UPDATE users SET username = ?, email = ?, name = ?, gender = ?, birthday = ? WHERE id = ?'
-        );
-        stmt.run(username, email, name, gender, birthday, req.user.id);
+      // Validate only what was actually sent, so this endpoint stays a true
+      // partial update.
+      if (has('username')) {
+        const message = isValidUsername(username);
+        if (message) return res.status(400).json({ error: message });
       }
-      res.json({ success: true });
+      if (has('email')) {
+        const message = isValidEmail(email);
+        if (message) return res.status(400).json({ error: message });
+      }
+      if (password) {
+        const message = isValidPassword(password);
+        if (message) return res.status(400).json({ error: message });
+      }
+
+      // Partial update: omitted fields keep their stored value, so saving the
+      // profile cannot blank out name/gender/birthday.
+      const updates: string[] = [];
+      const params: any[] = [];
+
+      if (has('username') || has('email')) {
+        const current = db.prepare('SELECT username, email FROM users WHERE id = ?')
+          .get(req.user.id) as any;
+        const nextUsername = has('username') ? username : current.username;
+        const nextEmail = has('email') ? email : current.email;
+        const conflict = db.prepare(
+          'SELECT id FROM users WHERE (email = ? OR username = ?) AND id != ?'
+        ).get(nextEmail, nextUsername, req.user.id);
+        if (conflict) {
+          return res.status(409).json({ error: 'That email or username is already in use' });
+        }
+      }
+
+      if (has('username')) { updates.push('username = ?'); params.push(username); }
+      if (has('email')) { updates.push('email = ?'); params.push(email); }
+      if (has('name')) { updates.push('name = ?'); params.push(name ?? null); }
+      if (has('gender')) { updates.push('gender = ?'); params.push(gender ?? null); }
+      if (has('birthday')) { updates.push('birthday = ?'); params.push(birthday ?? null); }
+      if (password) { updates.push('password = ?'); params.push(await bcrypt.hash(password, 10)); }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: 'No valid fields to update' });
+      }
+
+      db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`)
+        .run(...params, req.user.id);
+
+      const user = db.prepare(
+        'SELECT id, username, email, name, gender, birthday, onboarded FROM users WHERE id = ?'
+      ).get(req.user.id);
+      res.json({ success: true, user });
     } catch (error: any) {
       res.status(400).json({ error: error.message });
     }
@@ -200,12 +381,43 @@ async function startServer() {
   });
 
   app.put('/api/library/:id', authenticateToken, (req: any, res) => {
-    const { status, rating, notes, mood } = req.body;
+    // Partial update: only the fields present in the body are written, so
+    // changing a book's status cannot wipe its rating, notes or mood.
+    const allowed = ['status', 'rating', 'notes', 'mood'] as const;
+    const updates: string[] = [];
+    const params: any[] = [];
+
+    for (const field of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        let value = req.body[field];
+        if (field === 'rating') {
+          if (value === null || value === '') value = null;
+          else {
+            const rating = Number(value);
+            if (!Number.isFinite(rating) || rating < 0 || rating > 5) {
+              return res.status(400).json({ error: 'Rating must be between 0 and 5' });
+            }
+            value = Math.round(rating);
+          }
+        }
+        updates.push(`${field} = ?`);
+        params.push(value);
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
     try {
       const stmt = db.prepare(
-        'UPDATE user_books SET status = ?, rating = ?, notes = ?, mood = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?'
+        `UPDATE user_books SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND user_id = ?`
       );
-      stmt.run(status, rating, notes, mood, req.params.id, req.user.id);
+      const info = stmt.run(...params, req.params.id, req.user.id);
+      if (info.changes === 0) {
+        return res.status(404).json({ error: 'Book not found in your library' });
+      }
       res.json({ success: true });
     } catch (error: any) {
       res.status(400).json({ error: error.message });
@@ -237,7 +449,11 @@ async function startServer() {
         req.file.size,
         req.file.originalname
       );
-      res.json({
+      // Return the stored row so the client has created_at (and any other
+      // column it renders) instead of rendering "Invalid Date".
+      const saved = db.prepare('SELECT * FROM uploaded_books WHERE id = ?')
+        .get(info.lastInsertRowid) as any;
+      res.json(saved || {
         id: info.lastInsertRowid,
         title: title || req.file.originalname.replace(/\.[^/.]+$/, ''),
         file_url: fileUrl,
@@ -290,15 +506,21 @@ async function startServer() {
 
   app.post('/api/preferences/mood', authenticateToken, (req: any, res) => {
     const { mood } = req.body;
+    if (typeof mood !== 'string' || mood.trim().length === 0) {
+      return res.status(400).json({ error: 'A mood is required' });
+    }
     try {
       const checkStmt = db.prepare('SELECT user_id FROM user_preferences WHERE user_id = ?');
       if (!checkStmt.get(req.user.id)) {
         db.prepare('INSERT INTO user_preferences (user_id) VALUES (?)').run(req.user.id);
       }
+      db.prepare(
+        'INSERT INTO mood_logs (user_id, mood) VALUES (?, ?)'
+      ).run(req.user.id, mood.trim());
       const stmt = db.prepare(
         'UPDATE user_preferences SET last_mood = ?, last_mood_updated = CURRENT_TIMESTAMP WHERE user_id = ?'
       );
-      stmt.run(mood, req.user.id);
+      stmt.run(mood.trim(), req.user.id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(400).json({ error: error.message });
@@ -314,14 +536,139 @@ async function startServer() {
         GROUP BY status
       `);
       const statusCounts = stmt.all(req.user.id);
+      // Moods come from two places: explicit dashboard logs (mood_logs) and
+      // moods stamped onto individual books (user_books.mood). Counting both
+      // means the Mood Tracker panel reflects what the user actually logged.
       const moodStmt = db.prepare(`
-        SELECT mood, COUNT(*) as count 
-        FROM user_books 
-        WHERE user_id = ? AND mood IS NOT NULL 
+        SELECT mood, SUM(cnt) as count FROM (
+          SELECT mood, COUNT(*) as cnt
+          FROM mood_logs
+          WHERE user_id = ? AND mood IS NOT NULL AND TRIM(mood) != ''
+          GROUP BY mood
+          UNION ALL
+          SELECT mood, COUNT(*) as cnt
+          FROM user_books
+          WHERE user_id = ? AND mood IS NOT NULL AND TRIM(mood) != ''
+          GROUP BY mood
+        )
         GROUP BY mood
+        ORDER BY count DESC
       `);
-      const moodCounts = moodStmt.all(req.user.id);
+      const moodCounts = moodStmt.all(req.user.id, req.user.id);
       res.json({ statusCounts, moodCounts });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/reading/session/start', authenticateToken, (req: any, res) => {
+    const { uploaded_book_id, book_id, mood_before } = req.body ?? {};
+    try {
+      let libraryBookId: number | null = null;
+      let vaultBookId: number | null = null;
+
+      if (uploaded_book_id != null) {
+        const id = parseInt(String(uploaded_book_id), 10);
+        if (Number.isNaN(id)) {
+          return res.status(400).json({ error: 'Invalid uploaded_book_id' });
+        }
+        const owns = db.prepare(
+          'SELECT id FROM uploaded_books WHERE id = ? AND user_id = ?'
+        ).get(id, req.user.id);
+        if (!owns) {
+          return res.status(404).json({ error: 'Uploaded book not found' });
+        }
+        vaultBookId = id;
+      } else if (book_id != null) {
+        const id = parseInt(String(book_id), 10);
+        if (Number.isNaN(id)) {
+          return res.status(400).json({ error: 'Invalid book_id' });
+        }
+        const owns = db.prepare(
+          'SELECT book_id FROM user_books WHERE id = ? AND user_id = ?'
+        ).get(id, req.user.id) as any;
+        if (!owns) {
+          return res.status(404).json({ error: 'Library book not found' });
+        }
+        libraryBookId = owns.book_id;
+      } else {
+        return res.status(400).json({ error: 'A book_id or uploaded_book_id is required' });
+      }
+
+      const mood = typeof mood_before === 'string' && mood_before.trim() ? mood_before.trim() : null;
+      const info = db.prepare(`
+        INSERT INTO reading_sessions (user_id, book_id, uploaded_book_id, mood_before)
+        VALUES (?, ?, ?, ?)
+      `).run(req.user.id, libraryBookId, vaultBookId, mood);
+
+      res.json({ success: true, session_id: info.lastInsertRowid });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/reading/session/end', authenticateToken, (req: any, res) => {
+    const { session_id, pages_read, duration_minutes, mood_after } = req.body ?? {};
+    try {
+      const id = parseInt(String(session_id), 10);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid session_id' });
+      }
+      const session = db.prepare(
+        'SELECT id, session_end FROM reading_sessions WHERE id = ? AND user_id = ?'
+      ).get(id, req.user.id) as any;
+      if (!session) {
+        return res.status(404).json({ error: 'Reading session not found' });
+      }
+      if (session.session_end) {
+        return res.status(400).json({ error: 'Session already ended' });
+      }
+
+      const pages = Number.isFinite(Number(pages_read)) ? Math.max(0, Math.trunc(Number(pages_read))) : null;
+      const suppliedDuration = Number.isFinite(Number(duration_minutes))
+        ? Math.max(0, Math.trunc(Number(duration_minutes)))
+        : null;
+      const mood = typeof mood_after === 'string' && mood_after.trim() ? mood_after.trim() : null;
+
+      db.prepare(`
+        UPDATE reading_sessions
+        SET session_end = CURRENT_TIMESTAMP,
+            duration_minutes = COALESCE(
+              ?,
+              MAX(0, CAST((julianday('now') - julianday(session_start)) * 1440 AS INTEGER))
+            ),
+            pages_read = ?,
+            mood_after = ?
+        WHERE id = ? AND user_id = ?
+      `).run(suppliedDuration, pages, mood, id, req.user.id);
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.patch('/api/reading/session/:id', authenticateToken, (req: any, res) => {
+    const { mood_before } = req.body ?? {};
+    try {
+      const id = parseInt(String(req.params.id), 10);
+      if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid session id' });
+
+      const session = db.prepare(
+        'SELECT id, session_end FROM reading_sessions WHERE id = ? AND user_id = ?'
+      ).get(id, req.user.id) as any;
+      if (!session) return res.status(404).json({ error: 'Reading session not found' });
+      if (session.session_end) {
+        return res.status(400).json({ error: 'Cannot update a session that has ended' });
+      }
+
+      const mood = typeof mood_before === 'string' && mood_before.trim()
+        ? mood_before.trim()
+        : null;
+      db.prepare('UPDATE reading_sessions SET mood_before = ? WHERE id = ? AND user_id = ?')
+        .run(mood, id, req.user.id);
+
+      res.json({ success: true });
     } catch (error: any) {
       res.status(400).json({ error: error.message });
     }
@@ -342,7 +689,7 @@ async function startServer() {
         GROUP BY strftime('%m', updated_at)
         ORDER BY month ASC
       `);
-      const completedBooks = completedStmt.all(req.user.id, String(currentYear));
+      const completedBooks = completedStmt.all(req.user.id, String(currentYear)) as any[];
 
       const addedStmt = db.prepare(`
         SELECT 
@@ -353,7 +700,7 @@ async function startServer() {
           AND strftime('%Y', created_at) = ?
         GROUP BY strftime('%m', created_at)
       `);
-      const addedBooks = addedStmt.all(req.user.id, String(currentYear));
+      const addedBooks = addedStmt.all(req.user.id, String(currentYear)) as any[];
 
       const sessionsStmt = db.prepare(`
         SELECT 
@@ -365,7 +712,7 @@ async function startServer() {
           AND strftime('%Y', session_start) = ?
         GROUP BY strftime('%m', session_start)
       `);
-      const readingSessions = sessionsStmt.all(req.user.id, String(currentYear));
+      const readingSessions = sessionsStmt.all(req.user.id, String(currentYear)) as any[];
 
       const vaultBooksReadStmt = db.prepare(`
         SELECT 
@@ -377,7 +724,7 @@ async function startServer() {
           AND strftime('%Y', session_start) = ?
         GROUP BY strftime('%m', session_start)
       `);
-      const vaultBooksRead = vaultBooksReadStmt.all(req.user.id, String(currentYear));
+      const vaultBooksRead = vaultBooksReadStmt.all(req.user.id, String(currentYear)) as any[];
 
       const monthlyMap = new Map();
       for (let i = 1; i <= 12; i++) {
@@ -457,7 +804,7 @@ async function startServer() {
         ORDER BY ub.updated_at DESC
         LIMIT 10
       `);
-      const history = historyStmt.all(req.user.id);
+      const history = historyStmt.all(req.user.id) as any[];
       const moodStmt = db.prepare('SELECT last_mood FROM user_preferences WHERE user_id = ?');
       const mood = moodStmt.get(req.user.id) as any;
       const prefStmt = db.prepare('SELECT current_obsession FROM user_preferences WHERE user_id = ?');
@@ -723,6 +1070,9 @@ async function startServer() {
   app.get('/api/books/search', authenticateToken, async (req: any, res) => {
     const { q, source = 'google' } = req.query;
     if (!q) return res.status(400).json({ error: 'Search query is required' });
+    // Track upstream failures so an outage is reported instead of masquerading
+    // as "no books matched".
+    const warnings: string[] = [];
     try {
       let allResults: any[] = [];
       if (source === 'google' || source === 'all') {
@@ -734,6 +1084,9 @@ async function startServer() {
             { signal: controller.signal }
           );
           clearTimeout(timeoutId);
+          if (!googleResponse.ok) {
+            warnings.push(`Google Books unavailable (HTTP ${googleResponse.status})`);
+          }
           if (googleResponse.ok) {
             const googleData = await googleResponse.json();
             if (googleData.items) {
@@ -786,7 +1139,11 @@ async function startServer() {
               allResults = [...allResults, ...openLibResults];
             }
           }
+          if (!openLibResponse.ok) {
+            warnings.push(`Open Library unavailable (HTTP ${openLibResponse.status})`);
+          }
         } catch (openLibError) {
+          warnings.push('Open Library unavailable');
           console.error('Open Library error:', openLibError);
         }
       }
@@ -797,7 +1154,12 @@ async function startServer() {
         seenTitles.add(titleLower);
         return true;
       });
-      res.json({ success: true, results: deduplicated, totalResults: deduplicated.length });
+      res.json({
+        success: true,
+        results: deduplicated,
+        totalResults: deduplicated.length,
+        warnings,
+      });
     } catch (error: any) {
       console.error('Search error:', error);
       res.status(500).json({ success: false, error: 'Search failed', results: [] });
@@ -834,78 +1196,227 @@ async function startServer() {
     try {
       const prefStmt = db.prepare('SELECT * FROM user_preferences WHERE user_id = ?');
       const prefs = prefStmt.get(req.user.id) as any;
+
+      // Reading history, including ratings and moods, plus the Goodreads ids of
+      // everything already in the library so nothing is recommended twice.
       const historyStmt = db.prepare(`
-        SELECT b.title, b.author, ub.rating, ub.mood 
+        SELECT b.title, b.author, b.open_library_id, ub.rating, ub.mood
         FROM user_books ub
         JOIN books b ON ub.book_id = b.id
         WHERE ub.user_id = ? AND ub.status = 'completed'
-        ORDER BY ub.updated_at DESC LIMIT 20
+        ORDER BY ub.updated_at DESC LIMIT 50
       `);
       const history = historyStmt.all(req.user.id) as any[];
 
+      const libraryStmt = db.prepare(`
+        SELECT b.open_library_id FROM user_books ub
+        JOIN books b ON ub.book_id = b.id
+        WHERE ub.user_id = ?
+      `);
+      const libraryIds = new Set<string>();
+      const libraryTitles = new Set<string>();
+      (libraryStmt.all(req.user.id) as any[]).forEach(row => {
+        if (row.open_library_id) {
+          libraryIds.add(String(row.open_library_id));
+          const match = /^goodreads-(\d+)$/.exec(String(row.open_library_id));
+          if (match) libraryIds.add(match[1]);
+        }
+      });
+      history.forEach(h => h.title && libraryTitles.add(h.title.toLowerCase().trim()));
+
+      const genres: string[] = prefs?.favorite_genres ? JSON.parse(prefs.favorite_genres) : [];
+      const moodLogs = db.prepare(`
+        SELECT mood, COUNT(*) as count FROM mood_logs
+        WHERE user_id = ? GROUP BY mood ORDER BY count DESC LIMIT 5
+      `).all(req.user.id) as any[];
+
+      // ---- Build a weighted taste profile -------------------------------------
+      // Ratings carry the most signal, so a 5-star book counts for far more than
+      // an unrated one. Genres come from onboarding; authors and moods are
+      // derived from actual behaviour.
+      const authorWeights = new Map<string, number>();
+      const moodWeights = new Map<string, number>();
+      let ratingSum = 0;
+      let ratingCount = 0;
+
+      for (const entry of history) {
+        const rating = typeof entry.rating === 'number' ? entry.rating : null;
+        const weight = rating == null ? 1 : 0.4 + (rating / 5) * 1.6;
+        if (rating != null) {
+          ratingSum += rating;
+          ratingCount += 1;
+        }
+        if (entry.author) {
+          authorWeights.set(entry.author, (authorWeights.get(entry.author) || 0) + weight);
+        }
+        if (entry.mood) {
+          moodWeights.set(entry.mood, (moodWeights.get(entry.mood) || 0) + weight);
+        }
+      }
+      moodLogs.forEach(row => moodWeights.set(row.mood, (moodWeights.get(row.mood) || 0) + row.count * 0.5));
+      if (prefs?.preferred_mood) {
+        moodWeights.set(prefs.preferred_mood, (moodWeights.get(prefs.preferred_mood) || 0) + 1.5);
+      }
+
+      const topAuthors = [...authorWeights.entries()]
+        .sort((a, b) => b[1] - a[1]).map(([name]) => name).slice(0, 3);
+      const topMoods = [...moodWeights.entries()]
+        .sort((a, b) => b[1] - a[1]).map(([name]) => name).slice(0, 3);
+
+      const averageRating = ratingCount > 0 ? ratingSum / ratingCount : null;
+      const distinctAuthors = new Set(history.map(h => h.author).filter(Boolean)).size;
+
+      // ---- Obsession ----------------------------------------------------------
       let obsession = prefs?.current_obsession || 'Exploring';
       if (!prefs?.current_obsession) {
-        if (history.length > 0) {
-          const authorCounts: Record<string, number> = {};
-          history.forEach(h => {
-            if (h.author) authorCounts[h.author] = (authorCounts[h.author] || 0) + 1;
-          });
-          const topAuthor = Object.keys(authorCounts).sort((a, b) => authorCounts[b] - authorCounts[a])[0];
-          if (topAuthor && authorCounts[topAuthor] > 1) {
-            obsession = `Obsessed with ${topAuthor}`;
-          } else if (prefs && prefs.favorite_genres) {
-            const genres = JSON.parse(prefs.favorite_genres);
-            if (genres.length > 0) obsession = `Bingeing ${genres[0]}`;
-          }
-        } else if (prefs && prefs.favorite_genres) {
-          const genres = JSON.parse(prefs.favorite_genres);
-          if (genres.length > 0) obsession = `Craving ${genres[0]}`;
+        if (topAuthors.length > 0 && (authorWeights.get(topAuthors[0]) || 0) >= 2) {
+          obsession = `Obsessed with ${topAuthors[0]}`;
+        } else if (genres.length > 0) {
+          obsession = history.length > 0 ? `Bingeing ${genres[0]}` : `Craving ${genres[0]}`;
+        } else if (topMoods.length > 0) {
+          obsession = `In a ${topMoods[0].toLowerCase()} mood`;
         }
       }
 
-      let personality = 'The Newcomer';
-      if (history.length > 10) personality = 'The Voracious Reader';
-      else if (history.length > 5) personality = 'The Steady Scholar';
-      else if (prefs && prefs.reading_frequency === 'Daily') personality = 'The Daily Devourer';
-      else if (prefs && prefs.preferred_mood === 'Thought-provoking') personality = 'The Deep Thinker';
+      // ---- Personality -------------------------------------------------------
+      // Scored rather than first-match-wins, so a voracious reader who also
+      // prefers long-form books is described by what dominates.
+      const traits: { label: string; score: number }[] = [
+        { label: 'The Newcomer', score: history.length === 0 ? 3 : 0 },
+        { label: 'The Voracious Reader', score: Math.min(history.length / 12, 3) },
+        { label: 'The Steady Scholar', score: history.length >= 4 && history.length <= 12 ? 1.6 : 0 },
+        { label: 'The Daily Devourer', score: prefs?.reading_frequency === 'Daily' ? 2.4 : 0 },
+        { label: 'The Deep Thinker', score: prefs?.preferred_mood === 'Thought-provoking' ? 2.2 : 0 },
+        { label: 'The World Wanderer', score: distinctAuthors >= 5 ? 1.4 + distinctAuthors * 0.15 : 0 },
+        { label: 'The Discerning Critic', score: averageRating != null && averageRating >= 4 ? 2 : 0 },
+      ];
+      const personality = traits.reduce((best, t) => (t.score > best.score ? t : best)).label;
 
-      let searchQuery = '';
+      // ---- Candidate queries -------------------------------------------------
+      const ftsToken = (value: string) =>
+        value.replace(/["*():^-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+      const queries: string[] = [];
       if (prefs?.current_obsession) {
-        searchQuery = `${prefs.current_obsession} bestsellers`;
-      } else if (prefs && prefs.favorite_genres) {
-        const genres = JSON.parse(prefs.favorite_genres);
-        if (genres.length > 0) {
-          searchQuery = `${genres[0]} bestsellers`;
+        const token = ftsToken(prefs.current_obsession);
+        if (token) queries.push(token);
+      }
+      genres.slice(0, 2).forEach(g => {
+        const token = ftsToken(g);
+        if (token) queries.push(`genres:${token}*`);
+      });
+      topAuthors.slice(0, 2).forEach(a => {
+        const token = ftsToken(a);
+        if (token) queries.push(`author:${token}*`);
+      });
+      if (queries.length === 0) queries.push('genres:fiction*');
+
+      // ---- Score candidates from the local 6.4M-book index --------------------
+      const candidates: any[] = [];
+      const seen = new Set<string>();
+      const ftsStmt = db.prepare(`
+        SELECT gb.id, gb.title, gb.author, gb.star_rating AS rating,
+               gb.num_ratings AS ratings_count, gb.summary AS description,
+               gb.genres, bm25(goodreads_fts) AS relevance
+        FROM goodreads_fts
+        JOIN goodreads_books gb ON gb.id = goodreads_fts.rowid
+        WHERE goodreads_fts MATCH ?
+        ORDER BY relevance
+        LIMIT 40
+      `);
+
+      for (const match of queries.slice(0, 3)) {
+        if (candidates.length >= 24) break;
+        try {
+          const rows = ftsStmt.all(match) as any[];
+          for (const row of rows) {
+            const titleKey = (row.title || '').toLowerCase().trim();
+            if (!row.title || !row.author || row.author === 'Unknown Author') continue;
+            if (libraryIds.has(String(row.id))) continue;
+            if (titleKey && libraryTitles.has(titleKey)) continue;
+            if (seen.has(titleKey)) continue;
+            seen.add(titleKey);
+
+            // Quality: well-rated and widely rated beats a 5-star from 3 people.
+            const quality = (row.rating || 0) * Math.log10((row.ratings_count || 0) + 10);
+            candidates.push({ ...row, score: quality - (row.relevance || 0) });
+          }
+        } catch (err) {
+          console.warn('DRPA candidate query failed:', match, (err as Error).message);
         }
       }
-      if (!searchQuery) {
-        searchQuery = 'bestselling fiction 2024';
-      }
 
-      let recommendations = [];
-      try {
+      candidates.sort((a, b) => b.score - a.score);
+      const shortlist = candidates.slice(0, 6);
+
+      // ---- Fetch covers from Google Books, matched per title -----------------
+      // goodreads_books has no cover column, so covers come from Google Books.
+      // Queries are issued per shortlisted title because a single broad query
+      // ("science fiction") never lines up with the locally ranked titles.
+      const lookupCover = async (title: string, author?: string): Promise<string | null> => {
+        const safeTitle = title.replace(/"/g, '');
+        const safeAuthor = author ? author.replace(/"/g, '') : '';
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        const response = await fetch(
-          `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchQuery)}&maxResults=12&orderBy=relevance`,
-          { signal: controller.signal }
-        );
-        clearTimeout(timeoutId);
-        const data = await response.json();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        try {
+          const term = `intitle:"${safeTitle}"${safeAuthor ? `+inauthor:"${safeAuthor}"` : ''}`;
+          const response = await fetch(
+            `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=3`,
+            { signal: controller.signal }
+          );
+          // Google Books rate-limits aggressively (HTTP 429); fall through to
+          // Open Library rather than returning no cover at all.
+          if (response.ok) {
+            const data: any = await response.json();
+            for (const item of data.items || []) {
+              const cover = item.volumeInfo?.imageLinks?.thumbnail;
+              if (cover) return cover.replace('http:', 'https:');
+            }
+          }
+        } catch {
+          // fall through to Open Library
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
-        recommendations = (data.items || [])
-          .map((item: any) => ({
-            key: item.id,
-            title: item.volumeInfo.title,
-            author: item.volumeInfo.authors ? item.volumeInfo.authors[0] : 'Unknown',
-            cover_url: item.volumeInfo.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
-            description: item.volumeInfo.description || '',
-          }))
-          .filter((book: any) => book.title && book.author !== 'Unknown' && book.title.length > 3)
-          .slice(0, 6);
-      } catch (e) {
-        console.error('Failed to fetch recommendations', e);
-      }
+        try {
+          const olController = new AbortController();
+          const olTimeout = setTimeout(() => olController.abort(), 5000);
+          const params = new URLSearchParams({ title: safeTitle, limit: '1', fields: 'cover_i' });
+          if (safeAuthor) params.set('author', safeAuthor);
+          const olResponse = await fetch(
+            `https://openlibrary.org/search.json?${params.toString()}`,
+            { signal: olController.signal }
+          );
+          clearTimeout(olTimeout);
+          if (olResponse.ok) {
+            const olData: any = await olResponse.json();
+            const coverId = olData.docs?.[0]?.cover_i;
+            if (coverId) return `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`;
+          }
+        } catch {
+          // A missing cover is cosmetic; never fail the recommendation.
+        }
+        return null;
+      };
+
+      const covers = await Promise.all(
+        shortlist.map(book => lookupCover(book.title, book.author))
+      );
+
+      const recommendations = shortlist
+        .map((book, index) => ({
+          key: `goodreads-${book.id}`,
+          title: book.title,
+          author: book.author,
+          cover_url: covers[index] || null,
+          description: book.description || '',
+          rating: book.rating,
+          ratings_count: book.ratings_count,
+          genres: book.genres ? book.genres.split(',').slice(0, 5) : [],
+          source: 'Goodreads',
+        }))
+        .filter(book => book.title.length > 2);
 
       res.json({
         obsession,
@@ -953,24 +1464,70 @@ async function startServer() {
         '🤗': 'heartwarming feel good books',
       };
       const searchTerm = moodMap[targetMood as string] || `${targetMood} bestselling books 2024`;
+      let recommendations: any[] = [];
+      let source = 'Google Books';
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
-      const response = await fetch(
-        `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTerm)}&maxResults=6&orderBy=relevance`,
-        { signal: controller.signal }
-      );
-      clearTimeout(timeoutId);
-      const data = await response.json();
-      const recommendations = (data.items || [])
-        .map((item: any) => ({
-          key: item.id,
-          title: item.volumeInfo.title,
-          author: item.volumeInfo.authors ? item.volumeInfo.authors[0] : 'Unknown',
-          cover_url: item.volumeInfo.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
-          description: item.volumeInfo.description || '',
-        }))
-        .filter((book: any) => book.title && book.author !== 'Unknown');
-      res.json({ mood: targetMood, recommendations });
+      try {
+        const response = await fetch(
+          `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTerm)}&maxResults=6&orderBy=relevance`,
+          { signal: controller.signal }
+        );
+        // Without this check a 429/rate-limit body parses fine and looks
+        // identical to "no matches", silently hiding the outage.
+        if (!response.ok) {
+          throw new Error(`Google Books responded ${response.status}`);
+        }
+        const data = await response.json();
+        recommendations = (data.items || [])
+          .map((item: any) => ({
+            key: `google-${item.id}`,
+            title: item.volumeInfo.title,
+            author: item.volumeInfo.authors ? item.volumeInfo.authors[0] : 'Unknown',
+            cover_url: item.volumeInfo.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
+            description: item.volumeInfo.description || '',
+          }))
+          .filter((book: any) => book.title && book.author !== 'Unknown');
+      } catch (err) {
+        console.warn('Mood recommendations: Google Books unavailable, using local index:', (err as Error).message);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // Fall back to the local 6.4M-book index so this endpoint still returns
+      // something useful when Google Books is rate-limiting or unreachable.
+      if (recommendations.length === 0) {
+        source = 'Goodreads';
+        const token = searchTerm.replace(/["*():^-]/g, ' ').replace(/\s+/g, ' ').trim();
+        try {
+          const rows = db.prepare(`
+            SELECT gb.id, gb.title, gb.author, gb.star_rating AS rating,
+                   gb.num_ratings AS ratings_count, gb.summary AS description,
+                   bm25(goodreads_fts) AS relevance
+            FROM goodreads_fts
+            JOIN goodreads_books gb ON gb.id = goodreads_fts.rowid
+            WHERE goodreads_fts MATCH ?
+            ORDER BY relevance
+            LIMIT 6
+          `).all(token) as any[];
+          recommendations = rows
+            .filter(row => row.title && row.author && row.author !== 'Unknown Author')
+            .map(row => ({
+              key: `goodreads-${row.id}`,
+              title: row.title,
+              author: row.author,
+              cover_url: null,
+              description: row.description || '',
+              rating: row.rating,
+              ratings_count: row.ratings_count,
+            }));
+        } catch (err) {
+          console.warn('Mood recommendations: local lookup failed:', (err as Error).message);
+        }
+      }
+
+      res.json({ mood: targetMood, recommendations, source });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -1005,11 +1562,33 @@ async function startServer() {
     }
   });
 
+  // Unmatched API routes must 404 as JSON, never fall through to the SPA shell
+  app.use('/api', (req: any, res: any) => {
+    res.status(404).json({ error: `No API route for ${req.method} ${req.originalUrl}` });
+  });
+
   // Serve static frontend files in production
   const distPath = path.join(__dirname, 'dist');
+  const indexHtml = path.join(distPath, 'index.html');
   app.use(express.static(distPath));
   app.get('*', (req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
+    if (!fs.existsSync(indexHtml)) {
+      return res.status(503).json({
+        error: 'Frontend not built. Run `npm run build`, or use `npm run dev` for the Vite dev server.',
+      });
+    }
+    res.sendFile(indexHtml);
+  });
+
+  app.use((err: any, req: any, res: any, next: any) => {
+    if (res.headersSent) return next(err);
+    if (err?.message?.includes('not allowed by CORS')) {
+      return res.status(403).json({ error: 'Origin not allowed' });
+    }
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413
+      : err.status || err.statusCode || 500;
+    if (status >= 500) console.error('Unhandled error:', err);
+    res.status(status).json({ error: status >= 500 ? 'Internal server error' : err.message });
   });
 
   app.listen(PORT, '0.0.0.0', () => {

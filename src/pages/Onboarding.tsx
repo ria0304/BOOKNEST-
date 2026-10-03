@@ -15,6 +15,7 @@ export default function Onboarding() {
   const [mood, setMood] = useState('');
   const [types, setTypes] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const GENRES = ['Fantasy', 'Sci-Fi', 'Romance', 'Thriller', 'Mystery', 'Non-Fiction', 'Historical', 'Horror', 'Biography'];
   const FREQUENCIES = ['Daily', 'A few times a week', 'Weekly', 'Occasionally'];
@@ -31,6 +32,7 @@ export default function Onboarding() {
 
   const handleComplete = async () => {
     setLoading(true);
+    setErrorMsg(null);
     try {
       await apiFetch('/api/auth/onboard', {
         method: 'POST',
@@ -47,8 +49,9 @@ export default function Onboarding() {
         login(localStorage.getItem('token') || '', updatedUser);
       }
       navigate('/');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to save preferences', error);
+      setErrorMsg(error.message || 'Could not save your preferences. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -69,6 +72,12 @@ export default function Onboarding() {
           </h2>
           <span className="text-gray-400 text-sm">Step {step} of 4</span>
         </div>
+
+        {errorMsg && (
+          <div className="mb-6 px-4 py-3 rounded-lg text-center bg-red-900/50 border border-red-500/50 text-red-200">
+            {errorMsg}
+          </div>
+        )}
 
         {step === 1 && (
           <div className="space-y-6">

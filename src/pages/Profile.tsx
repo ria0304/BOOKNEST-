@@ -5,7 +5,7 @@ import { User, Mail, Lock, Save, LogOut } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 
 export default function Profile() {
-  const { user, logout } = useAuth();
+  const { user, token, login, logout } = useAuth();
   const [formData, setFormData] = useState({
     username: '',
     email: '',
@@ -29,13 +29,23 @@ export default function Profile() {
     setSaving(true);
     setMessage({ type: '', text: '' });
 
+    // Send only the fields this form actually owns so the server's partial
+    // update leaves name/gender/birthday untouched.
+    const payload: Record<string, string> = {
+      username: formData.username.trim(),
+      email: formData.email.trim(),
+    };
+    if (formData.password) payload.password = formData.password;
+
     try {
-      await apiFetch('/api/auth/me', {
+      const response = await apiFetch('/api/auth/me', {
         method: 'PUT',
-        body: JSON.stringify(formData)
+        body: JSON.stringify(payload)
       });
+      // Refresh the cached user so the navbar and this page show new values
+      // immediately instead of after a full reload.
+      if (token && response.user) login(token, response.user);
       setMessage({ type: 'success', text: 'Profile updated successfully!' });
-      // Clear password field after save
       setFormData(prev => ({ ...prev, password: '' }));
     } catch (error: any) {
       setMessage({ type: 'error', text: error.message || 'Failed to update profile' });

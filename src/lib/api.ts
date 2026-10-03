@@ -1,9 +1,18 @@
 export const apiFetch = async (url: string, options: RequestInit = {}) => {
   const token = localStorage.getItem('token');
-  const headers = {
-    ...options.headers,
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+
+  const headers: Record<string, string> = {};
+  if (options.headers instanceof Headers) {
+    options.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+  } else if (Array.isArray(options.headers)) {
+    for (const [key, value] of options.headers) headers[key] = value;
+  } else if (options.headers) {
+    Object.assign(headers, options.headers);
+  }
+
+  if (token) headers.Authorization = `Bearer ${token}`;
 
   if (!(options.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';

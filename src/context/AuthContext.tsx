@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 
 interface User {
   id: number;
@@ -26,24 +27,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (token) {
-      fetch(`${import.meta.env.VITE_API_URL || ''}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      .then(res => {
-        if (res.ok) return res.json();
-        throw new Error('Invalid token');
-      })
-      .then(data => {
-        setUser(data);
-      })
-      .catch(() => {
-        logout();
-      })
-      .finally(() => setLoading(false));
-    } else {
+    if (!token) {
       setLoading(false);
+      return;
     }
+
+    let cancelled = false;
+    // Use apiFetch so this call resolves against the same base URL and with the
+    // same auth/error handling as every other request in the app.
+    apiFetch('/api/auth/me')
+      .then(data => {
+        if (!cancelled) setUser(data);
+      })
+      .catch(error => {
+        if (cancelled) return;
+        // Only drop the session when the token itself is the problem.
+        if (/token|session|required/i.test(error.message)) {
+          logout();
+        } else {
+          console.error('Could not load profile:', error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [token]);
 
   const login = (newToken: string, newUser: User) => {
