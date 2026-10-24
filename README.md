@@ -152,17 +152,16 @@ Candidates are pulled live from Google Books and Open Library, so recommendation
 ```mermaid
 flowchart LR
     A["🌐 Browser<br/>React 19 SPA"]:::gray
-    B["⚡ Vite Dev Server<br/>localhost:5173 (dev only)"]:::teal
-    C["🟢 Express + TypeScript<br/>localhost:5000"]:::blue
+    B["⚡ Vite Dev Server<br/>localhost:5173 dev only"]:::teal
+    C["🐍 Express + TypeScript<br/>localhost:5000"]:::blue
     D["🗄️ SQLite<br/>bookhaven.db"]:::gray
-    E["📚 Google Books<br/>Open Library"]:::amber
-    F["🎬 TMDB"]:::amber
-    G["🔎 Goodreads FTS5<br/>6.4M books (optional)"]:::purple
-    H["📦 uploads/<br/>PDF · EPUB"]:::green
+    E["🤖 Google Books + Open Library"]:::amber
+    F["🖼️ TMDB movies"]:::amber
+    G["🧠 Goodreads FTS5<br/>6.4M books optional"]:::purple
+    H["📄 uploads folder<br/>PDF and EPUB"]:::green
 
     A --> B
-    B -->|"/api · /uploads"| C
-    A -.->|"production: same origin"| C
+    B -->|"api and uploads"| C
     C --> D
     C --> E
     C --> F
